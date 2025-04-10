@@ -1,42 +1,77 @@
+"""
+Клиент для подключения к игре "Сапёр"
+Обеспечивает взаимодействие с сервером и интерфейс пользователя
+"""
+
 import socket
 import threading
+import logging
+import re
 
-# Определяем адрес и порт сервера
-HOST = '127.0.0.1'
-PORT = 65432
+# Настройка вывода сообщений
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s'
+)
 
-# Создаем сокет и подключаемся к серверу
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.connect((HOST, PORT))
+class GameClient:
+    def __init__(self, host: str = '127.0.0.1', port: int = 65432):
+        """Инициализация клиента с параметрами подключения"""
+        self.host = host
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.running = False  # Флаг работы клиента
+        # Регулярка для проверки формата A1-J9
+        self.pattern = re.compile(r'^[A-Ja-j][1-9]$')  
 
-def receive_messages():
-    """
-    Функция для приёма сообщений от сервера и их вывода на экран.
-    
-    Эта функция выполняется в отдельном потоке, что позволяет клиенту непрерывно получать
-    обновления (например, комментарии игры или уведомления) от сервера.
-    """
-    while True:
+    def _receive_handler(self) -> None:
+        """Обработчик входящих сообщений от сервера"""
         try:
-            data = client.recv(1024).decode()
-            if not data:
-                break
-            print(data)
-            # Если получено сообщение о выигрыше или проигрыше, прекращаем приём сообщений
-            if "lose" in data or "win" in data:
-                break
-        except Exception as e:
-            print("Ошибка приёма:", e)
-            break
+            while self.running:
+                data = self.sock.recv(1024).decode()
+                if not data:
+                    break
+                # Разделение сообщений по переносам строк
+                for msg in data.split('\n'):
+                    if msg:
+                        logging.info(msg.strip())
+                        # Завершение при получении итогов игры
+                        if "VICTORY" in msg or "DEFEAT" in msg:
+                            self.running = False
+                            return
+        except (ConnectionResetError, TimeoutError):
+            logging.info("Connection lost")
 
-# Запускаем отдельный поток для приёма сообщений от сервера
-threading.Thread(target=receive_messages, daemon=True).start()
+    def _validate_input(self, text: str) -> bool:
+        """Проверка корректности ввода пользователя"""
+        return self.pattern.match(text.upper()) is not None
 
-# Основной цикл: считываем ввод пользователя и отправляем его на сервер
-while True:
-    message = input("-> ")
-    try:
-        client.send(message.encode())
-    except Exception as e:
-        print("Ошибка отправки сообщения:", e)
-        break
+    def start(self) -> None:
+        """Основной цикл работы клиента"""
+        try:
+            self.sock.connect((self.host, self.port))
+            self.running = True
+            # Запуск потока для приема сообщений
+            threading.Thread(target=self._receive_handler, daemon=True).start()
+            logging.info("Connected to server\n")
+            
+            # Цикл ввода ходов
+            while self.running:
+                try:
+                    move = input("Your move (e.g. A5): ").strip().upper()
+                    if not self._validate_input(move):
+                        logging.info("Invalid input! Use format A1-J9")
+                        continue
+                    
+                    self.sock.send(move.encode())
+                except (KeyboardInterrupt, EOFError):
+                    logging.info("\nQuitting...")
+                    break
+        except ConnectionRefusedError:
+            logging.info("Server unavailable")
+        finally:
+            self.running = False
+            self.sock.close()
+
+if __name__ == "__main__":
+    GameClient().start()
